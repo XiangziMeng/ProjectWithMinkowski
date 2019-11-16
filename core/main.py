@@ -1,64 +1,124 @@
-import os
-import numpy as np
-import jieba
+#coding: utf-8
 
-def get_stop_words():
-    stop_file = "data/stop_words.txt"
+import tensorflow as tf
+import numpy as np
+import subprocess
+
+try:
+    import jieba
+except:
+    subprocess.call(["pip3", "install", "jieba"])
+    import jieba
+
+def get_raw_data(filename):
+    raw_data = ""
+    for line in open(filename):
+        raw_data += line
+    return raw_data
+
+def get_stop_words(filename):
     stop_words = []
-    for line in open(stop_file):
+    for line in open(filename):
         word = line.strip()
         stop_words.append(word)
     return stop_words
 
-stop_words = get_stop_words()
+def get_raw_sentences(raw_data, stop_words):
+    raw_data = raw_data.replace("\n", "")
+    raw_sentences = raw_data.strip().split()
+    sentences = []
+    cnt = 0
+    for sentence in raw_sentences:
+        sentence = sentence.replace("，", " ")
+        sentence = sentence.replace("。", " ")
+        sentence = sentence.replace("、", " ")
+        sentence = sentence.replace("「", " ")
+        sentence = sentence.replace("」", " ")
+        sentence = sentence.replace("！", " ")
+        sentence = sentence.replace("？", " ")
+        sentence = sentence.replace("：", " ")
+        sentence = sentence.replace("…", " ")
+        sentence = sentence.replace("～", " ")
+        sentence = sentence.replace("＊", " ")
+        sentences += sentence.split()
+        cnt += 1
+    return sentences
 
-def parse_txt(filename):
-    with open(filename, "rb") as fp:
-        text = fp.read()
-        data = str(text, encoding="utf-8") 
-        keyword_count = {}
-        keyword_score = {}
-        seg_list = jieba.cut(data, cut_all=True)
-        for keyword in seg_list:
-            keyword = keyword.strip()
-            if keyword and len(keyword) > 1 and keyword not in stop_words:
-                keyword_count[keyword] = keyword_count.get(keyword, 0) + 1
-        total = 0
-        for k, v in keyword_count.items():
-            total += v * v
-        total = max(1, total)
-        for k, v in keyword_count.items():
-            keyword_score[k] = v * 1.0 / np.sqrt(total)
-    return keyword_score
-                
-def similar_score(keyword2score_a, keyword2score_b):
-    score = 0
-    for keyword, s_a in keyword2score_a.items():
-        if keyword in keyword2score_b:
-            s_b = keyword2score_b[keyword]
-            score += s_a * s_b
-    return score
+def get_sentences(sentences):
+    splited_sentences = []
+    cnt = 0
+    for sentence in sentences:
+        tokens = jieba.cut(sentence, cut_all=True)
+        words = [token.strip() for token in tokens if token.strip()]
+        splited_sentences.append(words)
+    return splited_sentences
+
+def get_word2int(sentences):
+    word_set = set()
+    word2int = {}
+    int2word = {}
+    for sentence in sentences:
+        for token in sentence:
+            word_set.add(token)
+    for i, word in enumerate(word_set):
+        word2int[word] = i
+        int2word[i] = word
+    return word2int, int2word
+
+def get_data(sentences, window_size):
+    data = []
+    for sentence in sentences:
+        for word_index, word in enumerate(sentence):
+            for nb_word in sentence[max(word_index - window_size, 0): min(word_index + window_size, len(sentence))]:
+                if nb_word != word:
+                    data.append([word, nb_word])   
+    return data
+
+def to_one_hot(data_point_index, vocab_size):
+    temp = np.zeros(vocab_size)
+    temp[data_point_index] = 1
+    return temp
 
 if __name__ == "__main__":
-    root = "data/20191105"
-    text_file_list = os.listdir("%s/clean" % root)[:5]
-    text_file2keyword_score = {}
-    for text_file in text_file_list:
-        text_file_full_path = os.path.join(root, "clean", text_file)
-        keyword_score = parse_txt(text_file_full_path)
-        text_file2keyword_score[text_file] = keyword_score
+    stop_file = "data/stop_words.txt"
+    example_file = "data/zh_example.txt"
+    fp = open("embeddings.txt", "w")
 
-    score_info = []
-    for text_file_1 in text_file_list:
-        for text_file_2 in text_file_list:
-            if text_file_1 == text_file_2:
-                continue
-            keyword_score_1 = text_file2keyword_score[text_file_1]
-            keyword_score_2 = text_file2keyword_score[text_file_2]
-            score = similar_score(keyword_score_1, keyword_score_2)
-            score_info.append([text_file_1, text_file_2, score])
-    score_info.sort(key=lambda item: item[2], reverse=True)
-    print (score_info[:5])
+    stop_words = get_stop_words(stop_file)
+    raw_data = get_raw_data(example_file)
+    raw_sentences = get_raw_sentences(raw_data, stop_words)
+    sentences = get_sentences(raw_sentences)
 
+    # first 5000 sentences
+    sentences = sentences[:5000]
+    print ("sentences: ", len(sentences))
+    word2int, int2word = get_word2int(sentences)
+    data = get_data(sentences, 2)
 
-        
+    vocab_size = len(word2int)
+    print ("vocab_size:", vocab_size)
+    x_train = []
+    y_train = []
+    for data_word in data:
+        x_train.append(to_one_hot(word2int[data_word[0]], vocab_size))
+        y_train.append(to_one_hot(word2int[data_word[1]], vocab_size))
+    x_train = np.asarray(x_train)
+    y_train = np.asarray(y_train)
+
+    print (x_train.shape, y_train.shape)
+    model = tf.keras.models.Sequential([
+        tf.keras.layers.Dense(30, activation='relu'),
+        tf.keras.layers.Dense(vocab_size, activation='softmax')])
+  
+    model.compile(optimizer='adam',
+                loss=tf.keras.losses.categorical_crossentropy,
+                metrics=['accuracy'])
+     
+    model.fit(x_train, y_train, epochs=50)
+    layer =model.layers[0]
+    weights = layer.get_weights()[0]
+
+    for i, word in int2word.items():
+        embedding = weights[i]
+        fp.write("%s\t%s\n" % (word, ",".join(map(str, embedding))))
+    fp.close()
